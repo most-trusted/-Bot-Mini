@@ -1,0 +1,61 @@
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bot-Mini Code Generator</title>
+  <style>
+    :root{--purple:#5b21b6;--yellow:#facc15}
+    body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;margin:0;background:linear-gradient(135deg,#12042f 0%,#2b065a 50%,#3b0b72 100%);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center}
+    .card{width:420px;background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));border-radius:16px;padding:28px;box-shadow:0 10px 30px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.04)}
+    h1{margin:0 0 6px;font-size:20px;letter-spacing:0.4px}
+    p.lead{margin:0 0 18px;color:rgba(255,255,255,0.85)}
+    label{display:block;margin-bottom:6px;font-size:13px}
+    input[type=text]{width:100%;padding:12px 14px;border-radius:10px;border:0;background:rgba(255,255,255,0.06);color:#fff;outline:none}
+    button{width:100%;padding:12px;border-radius:10px;border:0;background:var(--yellow);color:#1b0b03;font-weight:600;margin-top:12px;cursor:pointer}
+    .result{margin-top:14px;background:rgba(0,0,0,0.25);padding:10px;border-radius:8px;font-size:13px}
+    .brand{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+    .logo{width:44px;height:44px;border-radius:8px;background:linear-gradient(135deg,var(--purple),#8b5cf6);display:flex;align-items:center;justify-content:center;font-weight:700}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="logo">BM</div>
+      <div>
+        <h1>Bot-Mini Code Generator</h1>
+        <p class="lead">Generate pairing code for your WhatsApp bot instantly.</p>
+      </div>
+    </div>
+
+    <label for="number">WhatsApp number (e.g. 2547XXXXXXXX)</label>
+    <input id="number" type="text" placeholder="2547..." />
+    <button id="gen">Generate Code</button>
+
+    <div id="out" class="result" style="display:none"></div>
+  </div>
+
+<script>
+  const btn = document.getElementById('gen');
+  const out = document.getElementById('out');
+  btn.onclick = async () => {
+    const num = document.getElementById('number').value.trim();
+    if (!num) return alert('Enter number');
+    out.style.display = 'block';
+    out.innerHTML = 'Generating code...';
+    try {
+      const resp = await fetch(`/code?number=${encodeURIComponent(num)}`);
+      const data = await resp.json();
+      if (!data.ok) {
+        out.innerHTML = `<strong>Error:</strong> ${data.error || JSON.stringify(data)}`;
+        return;
+      }
+      out.innerHTML = `<strong>Session:</strong> ${data.sessionId}<br><strong>Code:</strong> <code>${data.code}</code><br><br><img src="${data.qrcodeDataUrl}" alt="qrcode" style="max-width:100%" />`;
+    } catch (e) {
+      out.innerHTML = 'Server error';
+    }
+  }
+</script>
+</body>
+</html>
