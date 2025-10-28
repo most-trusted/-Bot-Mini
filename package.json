@@ -1,18 +1,36 @@
 {
-  "name": "mini-code-generator",
+  "name": "the-hub-code-generator",
   "version": "1.0.0",
-  "description": "Beautiful WhatsApp Code Generator connected with MEGA session",
+  "description": "Beautiful WhatsApp Code Generator linked with MEGA session and Baileys",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "@adiwajshing/baileys": "^6.7.8",
+    "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.6.7",
     "express": "^4.19.2",
+    "fs-extra": "^11.2.0",
     "node-fetch": "^3.3.2",
     "pino": "^9.4.0",
-    "pino-pretty": "^11.2.2"
+    "pino-pretty": "^11.2.2",
+    "qrcode": "^1.5.3",
+    "qrcode-terminal": "^0.12.0",
+    "form-data": "^4.0.0",
+    "dotenv": "^16.4.5",
+    "chalk": "^5.3.0",
+    "moment-timezone": "^0.5.45",
+    "path": "^0.12.7",
+    "body-parser": "^1.20.3",
+    "node-cron": "^3.0.3",
+    "yt-search": "^2.10.4",
+    "ytdl-core": "^4.11.5",
+    "cheerio": "^1.0.0-rc.12",
+    "file-type": "^19.1.1",
+    "mime-types": "^2.1.35",
+    "uuid": "^9.0.1"
   },
   "engines": {
     "node": ">=18.x"
