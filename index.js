@@ -1,12 +1,10 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import pino from 'pino';
-import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { makeWASocket, DisconnectReason, useSingleFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,8 +50,8 @@ async function startBot() {
     }
 
     if (connection === 'close') {
-      const shouldReconnect =
-        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       console.log('Connection closed. Reconnecting...', shouldReconnect);
       if (shouldReconnect) startBot();
     } else if (connection === 'open') {
@@ -76,7 +74,7 @@ async function startBot() {
     if (text.startsWith('+song ')) {
       const query = text.slice(6).trim();
       await sock.sendMessage(from, { text: `🎵 Downloading *${query}* ... please wait.` });
-      // You can integrate a downloader API here later
+      // Integrate your downloader API here later
     }
   });
 }
@@ -90,7 +88,7 @@ app.get('/code', async (req, res) => {
   const number = req.query.number;
   if (!number) return res.status(400).json({ error: 'Missing number' });
 
-  // Just a simulated generator for now
+  // Simulate a code generator for now
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   console.log(`Code generated for ${number}: ${code}`);
   res.json({ number, code });
