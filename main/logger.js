@@ -1,13 +1,16 @@
-import Pino from 'pino';
+// main/logger.js
+import pino from 'pino'
 
-const level = process.env.LOG_LEVEL ?? 'info';
-const logger = Pino({
-  level,
+// Create a clean pino logger
+const logger = pino({
   transport: {
     target: 'pino-pretty',
-    options: { colorize: true }
+    options: {
+      colorize: true,
+      translateTime: 'SYS:standard',
+      ignore: 'pid,hostname'
+    }
   }
-});
+})
 
-export default logge
-r;
+export default logger
