@@ -1,21 +1,18 @@
 {
-  "name": "bot-mini",
+  "name": "mini-code-generator",
   "version": "1.0.0",
-  "description": "A mini WhatsApp bot with integrated pairing page and always-online features.",
+  "description": "Beautiful WhatsApp Code Generator connected with MEGA session",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
+    "axios": "^1.6.7",
     "express": "^4.19.2",
-    "pino": "^8.15.0",
-    "qrcode-terminal": "^0.12.0"
+    "node-fetch": "^3.3.2"
   },
   "engines": {
-    "node": ">=18"
-  },
-  "author": "Nector",
-  "license": "MIT"
+    "node": ">=18.x"
+  }
 }
