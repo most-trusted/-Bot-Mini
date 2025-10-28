@@ -1,159 +1,107 @@
-
 import express from 'express';
-import { makeWASocket, DisconnectReason, useSingleFileAuthState, fetchLatestBaileysVersion, makeInMemoryStore } from '@whiskeysockets/baileys';
-import qrcode from 'qrcode';
-import fs from 'fs-extra';
+import fetch from 'node-fetch';
+import pino from 'pino';
+import { Boom } from '@hapi/boom';
+import qrcode from 'qrcode-terminal';
+import { makeWASocket, DisconnectReason, useSingleFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import path from 'path';
-import bodyParser from 'body-parser';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const app = express();
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
+const port = process.env.PORT || 3000;
 
-const PORT = process.env.PORT || 3000;
-const SESSIONS_DIR = path.join(process.cwd(), 'sessions');
-fs.ensureDirSync(SESSIONS_DIR);
+// session file (auto created on first pairing)
+const { state, saveState } = useSingleFileAuthState('./session.json');
 
-app.use(express.static('public'));
+let sock;
 
-// Utility to persist session files
-const saveSession = async (sessionId, state) => {
-  const file = path.join(SESSIONS_DIR, `${sessionId}.json`);
-  await fs.writeJson(file, state, { spaces: 2 });
-};
+// Function to start the bot
+async function startBot() {
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  console.log(`Using Baileys v${version.join('.')}, Latest: ${isLatest}`);
 
-const loadSessionIfExists = (sessionId) => {
-  const file = path.join(SESSIONS_DIR, `${sessionId}.json`);
-  if (fs.existsSync(file)) return fs.readJsonSync(file);
-  return null;
-};
-
-// Active bot instances map: sessionId -> { sock }
-const activeBots = new Map();
-
-// Create and start a bot instance from an auth state (in-file state)
-async function startBot(sessionId, authState) {
-  if (activeBots.has(sessionId)) return activeBots.get(sessionId);
-
-  // create store (optional)
-  const store = makeInMemoryStore({});
-
-  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 2326, 10] }));
-
-  const sock = makeWASocket({
+  sock = makeWASocket({
     version,
+    logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    auth: authState,
+    auth: state,
+    browser: ['Bot-Mini', 'Chrome', '10.0']
   });
 
-  // basic event listeners
-  sock.ev.on('messages.upsert', async (m) => {
-    // simple command handler: !song <youtube-url>
-    try {
-      const message = m.messages && m.messages[0];
-      if (!message || !message.message) return;
-      const key = message.key;
-      const text = (message.message.conversation || message.message.extendedTextMessage?.text || '').trim();
-      if (!text) return;
-      if (text.startsWith('!ping')) {
-        await sock.sendMessage(key.remoteJid, { text: 'Pong!' }, { quoted: message });
-      }
-      if (text.startsWith('!song ')) {
-        const url = text.split(' ')[1];
-        await sock.sendMessage(key.remoteJid, { text: `Downloading song from: ${url}\n(placeholder — implement downloader in your repo)` }, { quoted: message });
-      }
-    } catch (e) {
-      console.error('message handler error', e);
+  // Always online + fake typing
+  setInterval(() => {
+    if (sock?.user) {
+      sock.sendPresenceUpdate('available');
+      sock.sendPresenceUpdate('composing');
     }
-  });
+  }, 15000);
 
+  // Auto save auth
+  sock.ev.on('creds.update', saveState);
+
+  // Connection updates
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'open') {
-      console.log(`${sessionId} connected`);
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log('Scan this QR to link your WhatsApp:');
+      qrcode.generate(qr, { small: true });
     }
+
     if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message;
-      console.log(`${sessionId} disconnected`, code);
-      activeBots.delete(sessionId);
+      const shouldReconnect =
+        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Connection closed. Reconnecting...', shouldReconnect);
+      if (shouldReconnect) startBot();
+    } else if (connection === 'open') {
+      console.log('✅ Bot-Mini connected successfully.');
     }
   });
 
-  // persist credentials periodically
-  sock.ev.on('creds.update', async () => {
-    try {
-      await saveSession(sessionId, sock.authState);
-    } catch (e) { console.error('saveSession error', e); }
-  });
+  // Simple reply to test
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
 
-  activeBots.set(sessionId, { sock, store });
-  return { sock, store };
+    const from = msg.key.remoteJid;
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+
+    if (text.startsWith('+ping')) {
+      await sock.sendMessage(from, { text: '🏓 Pong! Bot-Mini is online.' });
+    }
+
+    if (text.startsWith('+song ')) {
+      const query = text.slice(6).trim();
+      await sock.sendMessage(from, { text: `🎵 Downloading *${query}* ... please wait.` });
+      // You can integrate a downloader API here later
+    }
+  });
 }
 
-// Endpoint: generate a pairing code for a temporary session
+// Start Express server
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+
+// Code generator endpoint
 app.get('/code', async (req, res) => {
-  try {
-    const number = req.query.number || 'unknown';
-    const sessionId = `session-${Date.now()}`;
+  const number = req.query.number;
+  if (!number) return res.status(400).json({ error: 'Missing number' });
 
-    // Use single-file temporary auth state in memory
-    const authState = useSingleFileAuthState ? null : null; // placeholder — we'll use in-memory with save/load
-
-    // Create a temporary socket to generate QR / pairing
-    const sock = makeWASocket({ printQRInTerminal: false, auth: undefined });
-
-    let returned = false;
-
-    const onUpdate = async (update) => {
-      // some baileys builds return a .qr or .connection.update with qr string
-      try {
-        if (update.qr) {
-          const qr = update.qr;
-          // We return URL-safe code (the raw QR string) plus a base64 image
-          const imgData = await qrcode.toDataURL(qr);
-          if (!returned) {
-            returned = true;
-            res.json({ ok: true, sessionId, code: qr, qrcodeDataUrl: imgData, hint: 'Copy this code and use it in your WhatsApp phone to pair' });
-            // close the temporary socket
-            sock.ev.removeListener('connection.update', onUpdate);
-            try { sock.end(); } catch (e) { /* ignore */ }
-          }
-        }
-        // when connection becomes 'open' we can persist the session
-        if (update.connection === 'open') {
-          // store session
-          const authCreds = sock.authState;
-          await saveSession(sessionId, authCreds);
-          // start persistent bot using saved creds
-          await startBot(sessionId, authCreds);
-        }
-      } catch (e) {
-        console.error('onUpdate error', e);
-      }
-    };
-
-    sock.ev.on('connection.update', onUpdate);
-
-    // safety timeout
-    setTimeout(() => {
-      if (!returned) {
-        returned = true;
-        res.json({ ok: false, error: 'Timeout generating code' });
-        try { sock.end(); } catch (e) { }
-      }
-    }, 20000);
-
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: 'server error' });
-  }
+  // Just a simulated generator for now
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  console.log(`Code generated for ${number}: ${code}`);
+  res.json({ number, code });
 });
 
-// Endpoint to check status of saved sessions
-app.get('/sessions', (req, res) => {
-  const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
-  res.json({ sessions: files });
+// Default route
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => console.log(`Bot-Mini listening on port ${PORT}`));
-
+app.listen(port, () => {
+  console.log(`🚀 Bot-Mini server running on port ${port}`);
+  startBot();
+});
