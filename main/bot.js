@@ -1,110 +1,71 @@
+// main/bot.js
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, initAuthCreds } from "@whiskeysockets/baileys"
+import { Boom } from "@hapi/boom"
+import dotenv from "dotenv"
+import logger from "./logger.js"
+import fs from "fs"
+import path from "path"
 
-import 'dotenv/config';
-import fs from 'fs';
-import path from 'path';
-import Pino from 'pino';
-import {
-  makeWASocket,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore
-} from '@whiskeysockets/baileys';
-import logger from './logger.js';
-import { handleMessage } from './handlers.js';
-import { loadSavedAuth, saveAuth } from './utils.js';
+dotenv.config()
 
-const AUTH_DIR = path.join(process.cwd(), 'main', 'auth');
-if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-
-const log = logger;
-
-async function startBot() {
-  log.info('Starting bot...');
-
-  // fetch WA version (optional)
-  let waVersion;
+async function loadMegaSession(sessionString) {
   try {
-    const res = await fetchLatestBaileysVersion();
-    waVersion = res.version;
-    log.info({ waVersion }, 'fetched WA version');
+    const decoded = JSON.parse(Buffer.from(sessionString, "base64").toString("utf8"))
+    if (!decoded.creds || !decoded.keys) throw new Error("Invalid session format")
+
+    const authDir = path.join(process.cwd(), "main", "auth")
+    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true })
+
+    // Save creds + keys
+    fs.writeFileSync(path.join(authDir, "creds.json"), JSON.stringify(decoded.creds, null, 2))
+    fs.writeFileSync(path.join(authDir, "keys.json"), JSON.stringify(decoded.keys, null, 2))
+    return true
   } catch (e) {
-    log.warn('could not fetch WA version, proceeding with default');
+    logger.error("❌ Failed to load Mega session:", e.message)
+    return false
   }
-
-  // Load auth from .env if provided, else try disk, else fresh session
-  const envSession = process.env.SESSION_ID;
-  let auth;
-  if (envSession && envSession.trim()) {
-    log.info('Loading session from .env (SESSION_ID)');
-    try {
-      const creds = JSON.parse(Buffer.from(envSession, 'base64').toString());
-      const keyStore = makeCacheableSignalKeyStore({});
-      auth = { creds, keys: keyStore };
-    } catch (e) {
-      log.error('Failed to parse SESSION_ID - falling back to disk QR method', e);
-    }
-  }
-
-  if (!auth) {
-    // try to load saved auth from disk
-    const saved = loadSavedAuth();
-    if (saved) {
-      log.info('Loaded saved auth from disk');
-      auth = saved;
-    } else {
-      // start fresh (no creds) and let Baileys create creds which we'll save via events
-      log.info('No saved session found — starting with fresh auth (scan QR)');
-      auth = { creds: undefined, keys: makeCacheableSignalKeyStore({}) };
-    }
-  }
-
-  const sock = makeWASocket({
-    auth,
-    version: waVersion,
-    printQRInTerminal: !process.env.SESSION_ID,
-    logger: log
-  });
-
-  // save creds when updated
-  sock.ev.on('creds.update', async (creds) => {
-    try {
-      saveAuth(creds);
-      log.info('Saved credentials to disk');
-    } catch (e) {
-      log.error('Failed to save credentials', e);
-    }
-  });
-
-  sock.ev.on('connection.update', (update) => {
-    log.info({ update }, 'connection.update');
-    const conn = update.connection;
-    if (conn === 'close') {
-      log.warn('connection closed — restarting bot...');
-      setTimeout(() => startBot(), 2000);
-    } else if (conn === 'open') {
-      log.info('Connection open — bot ready');
-    }
-  });
-
-  // messages
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    for (const msg of messages) {
-      if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
-      if (msg.key.fromMe) continue;
-      try {
-        await handleMessage(sock, msg);
-      } catch (err) {
-        log.error('handleMessage error', err);
-      }
-    }
-  });
-
-  // expose sock on utils (optional)
-  return sock;
 }
 
-// start
-startBot().catch(err => {
-  console.error('Fatal', err);
-  proces
-  s.exit(1);
-});
+async function startBot() {
+  logger.info("Starting bot...")
+
+  // Load session from .env if available
+  const session = process.env.SESSION_ID
+  if (session && session.length > 10) {
+    logger.info("🧩 Loading session from .env (Mega style)")
+    await loadMegaSession(session)
+  } else {
+    logger.warn("⚠️ No SESSION_ID found, fallback to QR method")
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState("./main/auth")
+
+  const sock = makeWASocket({
+    auth: {
+      creds: state.creds ?? initAuthCreds(),
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    printQRInTerminal: !session,
+    browser: ["PowerBot", "Chrome", "7.0"],
+    logger,
+  })
+
+  sock.ev.on("creds.update", saveCreds)
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect } = update
+    if (connection === "close") {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode
+      if (reason !== DisconnectReason.loggedOut) {
+        logger.warn("Reconnecting...")
+        startBot()
+      } else {
+        logger.error("Logged out. Please update SESSION_ID.")
+      }
+    } else if (connection === "open") {
+      logger.info("🟢 Bot connected successfully")
+    }
+  })
+}
+
+startBot()
