@@ -13,109 +13,132 @@ dotenv.config();
 const logger = P({ level: "info" });
 
 async function startBot() {
-  logger.info("🚀 Starting PowerBot...");
+  try {
+    logger.info("🚀 Starting PowerBot...");
 
-  // Load session
-  const { state, saveCreds } = await useMultiFileAuthState("./main/auth");
+    // === Auth session ===
+    const { state, saveCreds } = await useMultiFileAuthState("./main/auth");
 
-  // Fetch latest WhatsApp Web version
-  const { version } = await fetchLatestBaileysVersion();
-  logger.info("✅ Using WhatsApp version:", version);
+    // === Fetch latest version ===
+    const { version } = await fetchLatestBaileysVersion();
+    logger.info("✅ Using WhatsApp version:", version);
 
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false,
-    logger,
-    browser: ["PowerBot", "Chrome", "7.0"],
-    markOnlineOnConnect: true
-  });
+    const sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      logger,
+      browser: ["PowerBot", "Chrome", "7.0"],
+      markOnlineOnConnect: true,
+      generateHighQualityLinkPreview: true,
+      syncFullHistory: false,
+      getMessage: async () => ({})
+    });
 
-  sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
-  // === Auto typing & always online ===
-  setInterval(async () => {
-    try {
-      await sock.sendPresenceUpdate("available");
-      await sock.sendPresenceUpdate("composing");
-    } catch {}
-  }, 15000);
+    // === Generate pairing code only if session missing ===
+    if (!fs.existsSync("./main/auth/creds.json")) {
+      const phoneNumber = process.env.PHONE_NUMBER;
+      if (!phoneNumber) {
+        logger.error("❌ PHONE_NUMBER missing in .env");
+        process.exit(1);
+      }
 
-  // === Handle incoming messages & auto-view status ===
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg?.message) return;
-
-    const jid = msg.key.remoteJid;
-    const fromMe = msg.key.fromMe;
-
-    // Auto-view status
-    if (jid?.endsWith("status@broadcast")) {
-      try {
-        await sock.readMessages([msg.key]);
-        logger.info("👀 Auto-viewed a status");
-      } catch {}
-      return;
+      const code = await sock.requestPairingCode(phoneNumber);
+      logger.info(`📲 Your WhatsApp Pairing Code: ${code}`);
     }
 
-    // Ignore bot's own messages
-    if (fromMe) return;
+    // === Auto typing + always online ===
+    setInterval(async () => {
+      try {
+        await sock.sendPresenceUpdate("available");
+        await sock.sendPresenceUpdate("composing");
+      } catch (err) {}
+    }, 15000);
 
-    // Extract message text
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message.imageMessage?.caption ||
-      msg.message.videoMessage?.caption ||
-      "";
-
-    const command = text.trim().split(" ")[0].toLowerCase();
+    // === Auto view status ===
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+      for (const msg of messages) {
+        if (msg.key?.remoteJid?.endsWith("status@broadcast")) {
+          try {
+            await sock.readMessages([msg.key]);
+            logger.info("👀 Auto-viewed a status");
+          } catch {}
+        }
+      }
+    });
 
     // === Commands ===
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+      const msg = messages[0];
+      if (!msg?.message || msg.key.fromMe) return;
 
-    if (command === "!ping") {
-      await sock.sendMessage(jid, { text: "🏓 Pong!" });
-    }
+      const sender = msg.key.remoteJid;
+      const text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        "";
 
-    if (command === "!tagall") {
-      try {
-        const metadata = await sock.groupMetadata(jid);
-        const participants = metadata.participants.map(p => p.id);
-        const mentions = participants;
+      // === !tagall ===
+      if (text.startsWith("!tagall")) {
+        try {
+          const metadata = await sock.groupMetadata(sender);
+          const participants = metadata.participants.map(p => p.id);
+          const mentions = participants;
 
-        await sock.sendMessage(jid, {
-          text:
-            "📢 Tagging everyone:\n\n" +
-            participants.map(u => `@${u.split("@")[0]}`).join(" "),
-          mentions
-        });
-      } catch (err) {
-        await sock.sendMessage(jid, {
-          text: "❌ This command only works in groups."
-        });
+          await sock.sendMessage(sender, {
+            text:
+              "📢 Tagging everyone:\n\n" +
+              participants.map(m => `@${m.split("@")[0]}`).join(" "),
+            mentions
+          });
+        } catch (err) {
+          logger.error("❌ Tagall error:", err);
+        }
       }
-    }
-  });
+    });
 
-  // === Connection handler ===
-  sock.ev.on("connection.update", update => {
-    const { connection, lastDisconnect } = update;
-    if (connection === "open") {
-      logger.info("✅ Connected to WhatsApp successfully!");
-    } else if (connection === "close") {
-      const reason =
-        lastDisconnect?.error?.output?.statusCode ||
-        lastDisconnect?.error?.message;
-      logger.error("❌ Connection closed:", reason);
-      if (reason !== DisconnectReason.loggedOut) startBot();
-      else logger.error("🚫 Session expired. Upload new creds.json");
-    }
-  });
+    // === Connection management ===
+    sock.ev.on("connection.update", async update => {
+      const { connection, lastDisconnect } = update;
+
+      if (connection === "open") {
+        logger.info("✅ Connected to WhatsApp successfully!");
+      } else if (connection === "close") {
+        const reason =
+          lastDisconnect?.error?.output?.statusCode ||
+          lastDisconnect?.error?.message ||
+          "";
+
+        logger.error("❌ Connection closed:", reason);
+
+        // Auto restart except logged out
+        if (reason !== DisconnectReason.loggedOut) {
+          logger.warn("♻️ Attempting auto-reconnect in 5s...");
+          setTimeout(() => startBot(), 5000);
+        } else {
+          logger.error("🚫 Session expired. Re-pair required.");
+        }
+      }
+    });
+
+    // === Periodic keepalive ===
+    setInterval(() => {
+      if (sock.ws?.readyState !== 1) {
+        logger.warn("🕓 Connection seems idle — attempting restart...");
+        startBot();
+      }
+    }, 60000); // check every 1 min
+  } catch (err) {
+    logger.error("🔥 Fatal error, restarting bot:", err);
+    setTimeout(() => startBot(), 5000);
+  }
 }
 
 startBot();
 
-// === Render keep-alive HTTP ===
+// === HTTP keep-alive for Render ===
 const PORT = process.env.PORT || 10000;
 http
   .createServer((req, res) => {
@@ -123,5 +146,6 @@ http
     res.end("PowerBot is running ✅");
   })
   .listen(PORT, () => {
-    console.log(`🌍 Web port active on ${PORT}`);
+    console.log(`🌍 Web port acti
+                               ve on ${PORT}`);
   });
