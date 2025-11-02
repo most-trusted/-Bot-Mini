@@ -6,6 +6,7 @@ import makeWASocket, {
 import P from "pino";
 import dotenv from "dotenv";
 import fs from "fs";
+import http from "http";
 
 dotenv.config();
 
@@ -71,7 +72,9 @@ async function startBot() {
         const mentions = participants;
 
         await sock.sendMessage(sender, {
-          text: "📢 Tagging everyone:\n\n" + participants.map(m => `@${m.split("@")[0]}`).join(" "),
+          text:
+            "📢 Tagging everyone:\n\n" +
+            participants.map(m => `@${m.split("@")[0]}`).join(" "),
           mentions
         });
       } catch (err) {
@@ -102,3 +105,14 @@ async function startBot() {
 }
 
 startBot();
+
+// ===== Render keep-alive HTTP port =====
+const PORT = process.env.PORT || 10000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("PowerBot is running ✅");
+  })
+  .listen(PORT, () => {
+    console.log(`🌍 Web port active on ${PORT}`);
+  });
