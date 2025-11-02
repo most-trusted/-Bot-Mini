@@ -1,71 +1,104 @@
-// main/bot.js
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, initAuthCreds } from "@whiskeysockets/baileys"
-import { Boom } from "@hapi/boom"
-import dotenv from "dotenv"
-import logger from "./logger.js"
-import fs from "fs"
-import path from "path"
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion
+} from "@whiskeysockets/baileys";
+import P from "pino";
+import dotenv from "dotenv";
+import fs from "fs";
 
-dotenv.config()
+dotenv.config();
 
-async function loadMegaSession(sessionString) {
-  try {
-    const decoded = JSON.parse(Buffer.from(sessionString, "base64").toString("utf8"))
-    if (!decoded.creds || !decoded.keys) throw new Error("Invalid session format")
-
-    const authDir = path.join(process.cwd(), "main", "auth")
-    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true })
-
-    // Save creds + keys
-    fs.writeFileSync(path.join(authDir, "creds.json"), JSON.stringify(decoded.creds, null, 2))
-    fs.writeFileSync(path.join(authDir, "keys.json"), JSON.stringify(decoded.keys, null, 2))
-    return true
-  } catch (e) {
-    logger.error("❌ Failed to load Mega session:", e.message)
-    return false
-  }
-}
+const logger = P({ level: "info" });
 
 async function startBot() {
-  logger.info("Starting bot...")
+  logger.info("🚀 Starting PowerBot...");
 
-  // Load session from .env if available
-  const session = process.env.SESSION_ID
-  if (session && session.length > 10) {
-    logger.info("🧩 Loading session from .env (Mega style)")
-    await loadMegaSession(session)
-  } else {
-    logger.warn("⚠️ No SESSION_ID found, fallback to QR method")
-  }
+  // Load session from ./main/auth
+  const { state, saveCreds } = await useMultiFileAuthState("./main/auth");
 
-  const { state, saveCreds } = await useMultiFileAuthState("./main/auth")
+  // Fetch latest WhatsApp Web version
+  const { version } = await fetchLatestBaileysVersion();
+  logger.info("✅ Using WhatsApp version:", version);
 
   const sock = makeWASocket({
-    auth: {
-      creds: state.creds ?? initAuthCreds(),
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
-    },
-    printQRInTerminal: !session,
-    browser: ["PowerBot", "Chrome", "7.0"],
+    version,
+    auth: state,
+    printQRInTerminal: false, // no QR, using creds.json
     logger,
-  })
+    browser: ["PowerBot", "Chrome", "7.0"],
+    markOnlineOnConnect: true
+  });
 
-  sock.ev.on("creds.update", saveCreds)
+  sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect } = update
-    if (connection === "close") {
-      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode
-      if (reason !== DisconnectReason.loggedOut) {
-        logger.warn("Reconnecting...")
-        startBot()
-      } else {
-        logger.error("Logged out. Please update SESSION_ID.")
+  // Auto-typing and always online every 15 s
+  setInterval(async () => {
+    try {
+      await sock.sendPresenceUpdate("available");
+      await sock.sendPresenceUpdate("composing");
+    } catch {}
+  }, 15000);
+
+  // Auto-view status updates
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    for (const msg of messages) {
+      if (msg.key?.remoteJid?.endsWith("status@broadcast")) {
+        try {
+          await sock.readMessages([msg.key]);
+          logger.info("👀 Auto-viewed a status");
+        } catch {}
       }
-    } else if (connection === "open") {
-      logger.info("🟢 Bot connected successfully")
     }
-  })
+  });
+
+  // Handle incoming messages
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg?.message || msg.key.fromMe) return;
+
+    const sender = msg.key.remoteJid;
+    const text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      "";
+
+    // === !tagall command ===
+    if (text.startsWith("!tagall")) {
+      try {
+        const metadata = await sock.groupMetadata(sender);
+        const participants = metadata.participants.map(p => p.id);
+        const mentions = participants;
+
+        await sock.sendMessage(sender, {
+          text: "📢 Tagging everyone:\n\n" + participants.map(m => `@${m.split("@")[0]}`).join(" "),
+          mentions
+        });
+      } catch (err) {
+        logger.error("❌ Tagall error:", err);
+      }
+    }
+  });
+
+  // Connection management
+  sock.ev.on("connection.update", update => {
+    const { connection, lastDisconnect } = update;
+
+    if (connection === "open") {
+      logger.info("✅ Connected to WhatsApp successfully!");
+    } else if (connection === "close") {
+      const reason =
+        lastDisconnect?.error?.output?.statusCode ||
+        lastDisconnect?.error?.message;
+
+      logger.error("❌ Connection closed:", reason);
+      if (reason !== DisconnectReason.loggedOut) {
+        startBot(); // auto-reconnect
+      } else {
+        logger.error("🚫 Session expired. Upload new creds.json");
+      }
+    }
+  });
 }
 
-startBot()
+startBot();
